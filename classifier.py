@@ -1,0 +1,172 @@
+
+import numpy as np
+import time
+import os
+from scipy.signal import welch
+import pandas as pd
+from sklearn.svm import SVC
+import joblib
+from muse_stream import get_eeg_buffer
+from feature_extraction import bandpass_filter
+from artifact_removal_ica import ica_blink_filter
+
+import serial 
+# Function to calculate standard deviation of a single-channel signal
+def calculate_std(signal):
+    """
+    Returns the standard deviation of a 1D signal (single channel).
+    """
+    return np.std(signal)
+
+# Function to calculate mobility and complexity (Hjorth parameters)
+def calculate_hjorth_parameters(signal):
+    first_derivative = np.diff(signal)
+    second_derivative = np.diff(first_derivative)
+    variance = np.var(signal)
+    mobility = np.sqrt(np.var(first_derivative) / variance)
+    complexity = np.sqrt(np.var(second_derivative) / np.var(first_derivative)) / mobility
+    return mobility, complexity
+
+# Function to calculate bandpowers (alpha and beta)
+def calculate_bandpowers(signal, fs=250):
+    freqs, psd = welch(signal, fs=fs, nperseg=fs)
+    alpha_band = np.logical_and(freqs >= 8, freqs <= 13)
+    beta_band = np.logical_and(freqs >= 13, freqs <= 30)
+    alpha_power = np.sum(psd[alpha_band])
+    beta_power = np.sum(psd[beta_band])
+    return alpha_power, beta_power
+
+
+from feature_extraction import hjorth_bandpower
+def process_idle_windows(idle_indices, df, window_size, num_windows=5):
+    processed_data = []
+    channel_names = ["Channel 1", "Channel 2", "Channel 3", "Channel 4"]
+    for start_idx in idle_indices:
+        for w in range(num_windows):
+            window_start = start_idx + w * window_size
+            window_end = window_start + window_size
+            if window_end > len(df):
+                continue
+            window = df.iloc[window_start:window_end, :4].values
+            window = bandpass_filter(window)
+
+            window = ica_blink_filter(window)
+            features = []
+            for i in range(4):
+                signal = window[:, i]
+                # if calculate_std(signal) > 100:
+                #     print("Unstable signal")
+                input = hjorth_bandpower(signal)
+                features.extend(input)
+            #actual_class = df.iloc[window_start, 4]
+            features.append(1)
+            processed_data.append(features)
+    return processed_data
+
+def process_attention_windows(attention_indices, df, window_size, num_windows=4):
+    processed_data = []
+    channel_names = ["Channel 1", "Channel 2", "Channel 3", "Channel 4"]
+    for start_idx in attention_indices:
+        for w in range(num_windows):
+            window_start = start_idx + w * window_size
+            window_end = window_start + window_size
+            if window_end > len(df):
+                continue
+            window = df.iloc[window_start:window_end, :4].values
+            #print(window.shape)
+            window = bandpass_filter(window)
+            window = ica_blink_filter(window)
+            
+            features = []
+            for i in range(4):
+                signal = window[:,i]
+                input = hjorth_bandpower(signal)
+                features.extend(input)
+            #actual_class = df.iloc[window_start, 4]
+            features.append(2)
+            processed_data.append(features)
+    return processed_data
+
+def classify(stop_event):
+    all_output_data = []
+
+    window_size = 500  # 2 seconds, 4 channels, 250Hz
+    csv_path = os.path.join(os.path.dirname(__file__), 'calibration.csv')
+    df = pd.read_csv(csv_path)
+
+    # Get indices where class is 2 (attention) and 1 (idle)
+    attention_indices = df.index[df['Class'] == 2].tolist()
+    idle_indices = df.index[df['Class'] == 1].tolist()
+
+    all_output_data.extend(process_attention_windows(attention_indices, df, window_size))
+    all_output_data.extend(process_idle_windows(idle_indices, df, window_size))
+
+    all_output_data = np.array(all_output_data)
+
+    from sklearn.preprocessing import StandardScaler
+
+    scaler = StandardScaler()
+    X = all_output_data[:, :-1]
+    X_scaled = scaler.fit_transform(X)
+    # Save the fitted scaler for real-time use
+
+    # Combine scaled features with original classification column
+    all_output_data = np.hstack([X_scaled, all_output_data[:, -1].reshape(-1, 1)])
+
+    # Features: all columns except last
+    X = all_output_data[:, :-1]
+    # Labels: last column
+    y = all_output_data[:, -1]
+
+
+    svm = SVC(kernel='linear')
+    svm.fit(X,y)
+
+
+
+    try:
+        attention_threshold = 0
+        ser = serial.Serial('/dev/serial0', 9600, timeout=1) 
+        while not stop_event.is_set():
+            data_array = get_eeg_buffer()
+            if len(data_array) < window_size:
+                time.sleep(0.1)
+                continue
+            if len(data_array) == window_size*4:
+                eeg_window = data_array.reshape(window_size, 4)
+                features = []
+                eeg_window = bandpass_filter(eeg_window)
+                eeg_window = ica_blink_filter(eeg_window)
+                for ch in range(4):
+                    signal = eeg_window[:, ch]
+                    features.extend(hjorth_bandpower(signal))
+                features = np.array(features).reshape(1, -1)
+                # Load the scaler and scale features
+                features_scaled = scaler.transform(features)
+                # Predict class
+                predicted_class = svm.predict(features_scaled)[0]
+                adder = -10
+                if predicted_class == 2:
+                    adder = 1
+
+                attention_threshold += adder
+                attention_threshold = max(0, min(attention_threshold, 220))
+
+                gesture = 'O'
+                if attention_threshold >= 200:
+                    gesture = 'C'
+                ser.write(gesture.encode())    # <----- ADD THIS 
+                print(f"Predicted class: {gesture}")
+                time.sleep(0.12)
+        print("Exiting classification")
+        return
+    except KeyboardInterrupt:
+        print("Exiting...")
+
+import threading
+def main():
+    stop_event = threading.Event()
+    classify(stop_event)
+
+if __name__ == "__main__":
+    main()
