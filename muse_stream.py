@@ -20,13 +20,15 @@ def get_devices_list():
         asyncio.set_event_loop(None)
     
     
-def start_muse_stream(MAC_ADDRESS, start_event, stop_event):
+def start_muse_stream(MAC_ADDRESS, start_event, stop_event, error_flag):
     print("[INFO] Starting muselsl stream...")
     global stream_process
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         stream(MAC_ADDRESS, start_event, stop_event)
+    except Exception as e:
+        error_flag.set()
     finally:
         asyncio.set_event_loop(None)
     
@@ -58,7 +60,7 @@ def connect_to_eeg_stream():
 eeg_buffer = None
 eeg_buffer_lock = threading.Lock()
 
-def update_eeg_buffer(start_event, stop_event):
+def update_eeg_buffer(start_event, stop_event, error_flag):
     global eeg_buffer
     buffer_size = 4 * 250 *2
     eeg_buffer = np.zeros(buffer_size, dtype=np.float32)
@@ -75,6 +77,7 @@ def update_eeg_buffer(start_event, stop_event):
         print("\n[INFO] Stopping...")
     except:
         print("\n Something went wrong creating EEG buffer")
+        error_flag.set()
     return "Stream Ended"
 
 

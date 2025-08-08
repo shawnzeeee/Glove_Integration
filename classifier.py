@@ -87,47 +87,46 @@ def process_attention_windows(attention_indices, df, window_size, num_windows=4)
             processed_data.append(features)
     return processed_data
 
-def classify(stop_event):
-    all_output_data = []
-
-    window_size = 500  # 2 seconds, 4 channels, 250Hz
-    csv_path = os.path.join(os.path.dirname(__file__), 'calibration.csv')
-    df = pd.read_csv(csv_path)
-
-    # Get indices where class is 2 (attention) and 1 (idle)
-    attention_indices = df.index[df['Class'] == 2].tolist()
-    idle_indices = df.index[df['Class'] == 1].tolist()
-
-    all_output_data.extend(process_attention_windows(attention_indices, df, window_size))
-    all_output_data.extend(process_idle_windows(idle_indices, df, window_size))
-
-    all_output_data = np.array(all_output_data)
-
-    from sklearn.preprocessing import StandardScaler
-
-    scaler = StandardScaler()
-    X = all_output_data[:, :-1]
-    X_scaled = scaler.fit_transform(X)
-    # Save the fitted scaler for real-time use
-
-    # Combine scaled features with original classification column
-    all_output_data = np.hstack([X_scaled, all_output_data[:, -1].reshape(-1, 1)])
-
-    # Features: all columns except last
-    X = all_output_data[:, :-1]
-    # Labels: last column
-    y = all_output_data[:, -1]
-
-
-    svm = SVC(kernel='linear')
-    svm.fit(X,y)
-
-
-
+def classify(stop_event, error_flag):
     try:
+        all_output_data = []
+
+        window_size = 500  # 2 seconds, 4 channels, 250Hz
+        csv_path = os.path.join(os.path.dirname(__file__), 'calibration.csv')
+        df = pd.read_csv(csv_path)
+
+        # Get indices where class is 2 (attention) and 1 (idle)
+        attention_indices = df.index[df['Class'] == 2].tolist()
+        idle_indices = df.index[df['Class'] == 1].tolist()
+
+        all_output_data.extend(process_attention_windows(attention_indices, df, window_size))
+        all_output_data.extend(process_idle_windows(idle_indices, df, window_size))
+
+        all_output_data = np.array(all_output_data)
+
+        from sklearn.preprocessing import StandardScaler
+
+        scaler = StandardScaler()
+        X = all_output_data[:, :-1]
+        X_scaled = scaler.fit_transform(X)
+        # Save the fitted scaler for real-time use
+
+        # Combine scaled features with original classification column
+        all_output_data = np.hstack([X_scaled, all_output_data[:, -1].reshape(-1, 1)])
+
+        # Features: all columns except last
+        X = all_output_data[:, :-1]
+        # Labels: last column
+        y = all_output_data[:, -1]
+
+
+        svm = SVC(kernel='linear')
+        svm.fit(X,y)
+
         attention_threshold = 0
         ser = serial.Serial('/dev/serial0', 9600, timeout=1) 
         while not stop_event.is_set():
+            print("from classifier", stop_event)
             data_array = get_eeg_buffer()
             if len(data_array) < window_size:
                 time.sleep(0.1)
@@ -156,12 +155,15 @@ def classify(stop_event):
                 if attention_threshold >= 200:
                     gesture = 'C'
                 ser.write(gesture.encode())    # <----- ADD THIS 
-                print(f"Predicted class: {gesture}")
+                #print(f"Predicted class: {gesture}")
                 time.sleep(0.12)
         print("Exiting classification")
         return
     except KeyboardInterrupt:
         print("Exiting...")
+    except Exception as e:
+        error_flag.set()
+
 
 import threading
 def main():
